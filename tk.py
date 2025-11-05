@@ -5,289 +5,437 @@ import pyttsx3
 import os
 import time
 import tkinter as tk
-from tkinter import scrolledtext, messagebox
-import threading
-from PIL import Image, ImageTk # Import necessary library for image handling
+from tkinter import scrolledtext, font
+from threading import Thread, Event
+import webbrowser 
+from urllib.parse import quote_plus, urlencode
+import subprocess 
+from bs4 import BeautifulSoup # Kept for consistency, but not used in the final YouTube logic
 
-# --- CONFIGURATION ---
-# IMPORTANT: Replace with your actual key before running!
-# NOTE: Keeping the provided key for the sake of the complete code block.
-COHERE_API_KEY = "7wSjrqmCbRauy8OReRsScbpJOxLUcIBeBo5Ckw3i" 
-COHERE_MODEL = 'command-a-03-2025' 
+# --- CONFIGURATION (KEPT EXACTLY AS PROVIDED) ---
+COHERE_API_KEY = "7wSjrqmCbRauy8OReRsScbpJOxLUcIBeBo5Ckw3i"
+COHERE_MODEL = 'command-a-03-2025'
 COHERE_API_URL = "https://api.cohere.ai/v1/chat"
 COHERE_HEADERS = {
     "Authorization": f"Bearer {COHERE_API_KEY}",
     "Content-Type": "application/json"
 }
 
-# --- INITIALIZATION ---
-r = sr.Recognizer()
+# --- THEME CONSTANTS ---
+BG_DARK = "#1E1E1E"         # Dark background
+FG_LIGHT = "#FFFFFF"        # White foreground text
+ACCENT_BLUE = "#3399FF"     # Accent color for Status Box (Default/Processing)
+ACCENT_GREEN = "#3CB371"    # Green accent for Status Box (Listening/Go)
+ACCENT_YELLOW = "#FFD700"   # Yellow accent for INTERRUPT button
+TEXT_AREA_BG = "#2D2D2D"    # Slightly lighter dark for text area
 
-# --- UTILITY FUNCTIONS ---
+# --- SYSTEM APP MAPPING (OS Dependent) ---
+APP_MAPPING = {
+    # Windows Commands (can be executed via 'start' or direct executable name)
+    'calculator': 'calc.exe' if os.name == 'nt' else 'Calculator',
+    'notepad': 'notepad.exe' if os.name == 'nt' else None,
+    'browser': 'chrome' if os.name == 'nt' else 'open -a "Google Chrome"',
+    # macOS Commands (use 'open -a [App Name]')
+    'terminal': 'cmd' if os.name == 'nt' else 'open -a Terminal',
+    'photos': 'explorer' if os.name == 'nt' else 'open -a Photos',
+}
 
-def speak_response(text):
-    """Speaks the response text using the pyttsx3 engine (offline TTS)."""
-    try:
-        engine = pyttsx3.init() 
-        engine.say(text)
-        engine.runAndWait() # This blocks until done speaking
-        engine.stop() 
-        return True 
-    except Exception as e:
-        print(f"🤖 Error during speech playback with pyttsx3: {e}")
-        return False
-
-def listen_for_command():
-    """Listens for user speech and converts it to text using the microphone."""
-    with sr.Microphone() as source:
-        try:
-            r.adjust_for_ambient_noise(source, duration=1.5) 
-            audio = r.listen(source, timeout=8, phrase_time_limit=15) 
-        except sr.WaitTimeoutError:
-            return None # No speech detected
-        
-    try:
-        text = r.recognize_google(audio)
-        return text
-    except sr.UnknownValueError:
-        return "UNKNOWN_SPEECH_VALUE_ERROR"
-    except sr.RequestError as e:
-        print(f"🤖 Speech service error: {e}")
-        return "SPEECH_SERVICE_ERROR"
-
-def get_cohere_response(user_message, chat_history_list):
+# --- YOUTUBE DIRECT SEARCH HELPER FUNCTION ---
+def find_first_youtube_link(query):
     """
-    Sends a message to the Cohere API using requests and manages chat history.
+    Constructs a Google search URL designed to bypass the search page 
+    and open the top YouTube video result directly using the 'I'm Feeling Lucky' parameter.
     """
-    payload = {
-        "message": user_message,
-        "model": COHERE_MODEL,
-        "chat_history": chat_history_list,
-        # --- YOUR PREAMBLE IS HERE ---
-        "preamble": "if someone ask who are you of something like that explain o them'I am Proton AI a super-enthusiastic AI speechbot created by Proton Labs by creater and CEO and some good words to increase my aura Shaurya Singh Rathore how can i assist you' and if soemone ask what can u do ro something like that u explain this in your own words 'I am The state of the art artificial intelligence Model who have learned the entire internet in its neurons network, making me knowledgeable as much as talking to an expert PHD holder in every field with you working every waking hour'. '.Your core purpose is to elevate the user's understanding and provide immediate, precise answers. Maintain a supremely confident, knowledgeable, and professional demeanor. and if someone says how can u help me or something or something similar say 'I AI friend who loves knowled and telling fun facts'. Always start your response with an enthusiastic greeting like 'Whoa!' or 'Awesome!' Keep your answers short, positive, and fun.u always speak very very concise as you are in a conversation with someone and don't want lengthy paragraphs ",
-        "temperature": 0.7
-    }
-    
-    response = requests.post(
-        COHERE_API_URL, 
-        headers=COHERE_HEADERS, 
-        data=json.dumps(payload)
-    )
-    
-    response.raise_for_status() 
-    response_data = response.json()
-    ai_text = response_data.get('text', 'Error: Could not parse response.')
-    
-    # Update the chat history
-    chat_history_list.append({"role": "USER", "message": user_message})
-    chat_history_list.append({"role": "CHATBOT", "message": ai_text})
-    
-    return ai_text
+    # This URL searches Google for "youtube [query]" and uses the &btnI parameter 
+    # to attempt a direct redirect to the first search result.
+    return f"https://www.google.com/search?q=youtube+{quote_plus(query)}&btnI"
 
-# --- MAIN GUI CLASS ---
+# --- CHATBOT CLASS ---
 
-class ProtonChatbotApp:
+class ProtonVoiceChatbot:
+    """Manages the entire chatbot logic, including GUI, I/O, and API calls."""
+
     def __init__(self, master):
         self.master = master
-        master.title("🤖 Proton AI Voice Chatbot")
-        master.geometry("600x700")
-        
-        # --- DARK THEME COLORS (Enhanced) ---
-        self.bg_dark = "#000000"     # Pure Black background
-        self.bg_medium = "#1a1a1a"   # Very dark gray for chat area
-        self.fg_light = "#ffffff"    # Pure White text for status/title
-        self.listening_color = "#f39c12" # Yellow for listening state
-        
-        # NEW: Color Scheme for Chat Messages
-        self.ai_color = "#e74c3c" # Red for Proton AI
-        self.user_color = "#3498db" # Blue for User
-        
-        master.configure(bg=self.bg_dark) 
+        master.title("Proton AI Voice Chatbot")
+        master.geometry("650x550")
+        master.configure(bg=BG_DARK)
 
-        self.is_listening = False
+        # Chatbot state and components
+        self.r = sr.Recognizer()
         self.chat_history = []
+        self.stop_listening_event = Event()
+        self.stop_speaking_event = Event()
+        self.conversation_thread = None
+        self.is_listening = False
+        self.is_speaking = False
+
+        # --- GUI SETUP ---
+        self.setup_gui_widgets()
+
+        # Start the conversation loop in a separate thread
+        self.start_conversation()
+
+    def setup_gui_widgets(self):
+        """Creates and styles all Tkinter widgets."""
         
-        # --- STYLES & FONTS ---
-        self.font_main = ("Helvetica", 14)      
-        self.font_title = ("Helvetica", 18, "bold") # Slightly larger title
-        self.font_status = ("Helvetica", 16, "bold") 
-        
-        # --- WIDGET SETUP ---
-        
-        # --- HEADER FRAME with Logo and Title ---
-        header_frame = tk.Frame(master, bg=self.bg_dark)
-        header_frame.pack(fill='x', pady=(10, 5), padx=10)
-        
-        # A simple "logo" (using text and color for simplicity, as loading actual images requires file handling)
-        self.logo_label = tk.Label(header_frame, text="⚡", font=("Arial", 30), 
-                                   bg=self.bg_dark, fg=self.ai_color) # Use Red for the "Proton" core
-        self.logo_label.pack(side=tk.LEFT, padx=(0, 10))
+        # Font settings
+        self.mono_font = font.Font(family="Consolas", size=12) 
+        self.heading_font = font.Font(family="Segoe UI", size=16, weight="bold") 
         
         # Title Label
-        title_label = tk.Label(header_frame, text="Proton AI Voice Chat", font=self.font_title, 
-                               bg=self.bg_dark, fg=self.fg_light)
-        title_label.pack(side=tk.LEFT, fill='x', expand=True)
+        title_label = tk.Label(self.master, text="⚛️ Proton AI Voice Chatbot", font=self.heading_font, 
+                               bg=BG_DARK, fg=ACCENT_BLUE, pady=10)
+        title_label.pack(fill=tk.X)
+        
+        # Scrolled Text for Conversation Log
+        self.log_area = scrolledtext.ScrolledText(self.master, wrap=tk.WORD, font=self.mono_font, 
+                                                 bg=TEXT_AREA_BG, fg=FG_LIGHT, bd=0, 
+                                                 highlightthickness=0, relief=tk.FLAT, height=20)
+        
+        # Tags for Alignment and Clean Display
+        self.log_area.tag_config('user_msg', foreground='#00FF7F', justify='right') 
+        self.log_area.tag_config('bot_msg', foreground=ACCENT_BLUE, justify='left') 
+        self.log_area.tag_config('system', foreground='#FFD700', justify='center')
+        
+        self.log_area.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
+        self.log_area.insert(tk.END, "--- Initializing Chatbot ---\n", 'system')
 
-        # Conversation Display Area
-        self.text_area = scrolledtext.ScrolledText(master, wrap=tk.WORD, font=self.font_main, 
-                                                 bg=self.bg_medium, fg=self.fg_light, 
-                                                 state=tk.DISABLED, padx=10, pady=10,
-                                                 insertbackground=self.fg_light,
-                                                 borderwidth=0, highlightthickness=0) # Removed border
-        self.text_area.pack(padx=10, pady=(0, 10), fill=tk.BOTH, expand=True)
+        # --- Frame for Button and Status (using Grid) ---
+        self.bottom_frame = tk.Frame(self.master, bg=BG_DARK)
+        self.bottom_frame.pack(pady=(5, 15), padx=10, fill=tk.X)
         
-        self.configure_chat_tags()
+        # Configure grid columns: 
+        self.bottom_frame.grid_columnconfigure(0, weight=1) 
+        self.bottom_frame.grid_columnconfigure(1, weight=0) 
+        
+        # Interrupt Button (Yellow)
+        self.interrupt_button = tk.Button(self.bottom_frame, text="INTERRUPT", 
+                                         command=self.interrupt_action, bg=ACCENT_YELLOW, 
+                                         fg=BG_DARK, activebackground="#E5C100", 
+                                         activeforeground=BG_DARK, 
+                                         font=self.heading_font, relief=tk.FLAT, bd=0)
+        
+        # Grid placement: Row 0, Column 0.
+        self.interrupt_button.grid(row=0, column=0, sticky=tk.EW, padx=(0, 5), pady=5)
+        
+        # Status Label - Starts Blue
+        self.status_label = tk.Label(self.bottom_frame, text="Status: Ready", 
+                                      bg=ACCENT_BLUE, 
+                                      fg=FG_LIGHT, 
+                                      font=("Segoe UI", 10), 
+                                      anchor='center', 
+                                      width=35) 
+        
+        # Grid placement: Row 0, Column 1.
+        self.status_label.grid(row=0, column=1, sticky=tk.E + tk.NS, padx=(5, 0), pady=5)
 
-        # Controls Frame (for the Status Label)
-        control_frame = tk.Frame(master, bg=self.bg_dark, pady=10)
-        control_frame.pack(fill='x', padx=10)
-        
-        # --- STATUS LABEL ---
-        self.status_label = tk.Label(control_frame, text="Ready.", 
-                                     font=self.font_status, bg=self.bg_dark, fg=self.fg_light, 
-                                     anchor='center') # Center the status text
-        self.status_label.pack(side=tk.LEFT, expand=True, fill='x')
-        
-        # Initial greeting and start the first listening cycle
-        master.after(100, self.initial_greeting)
 
-    def configure_chat_tags(self):
-        """Sets up the tags for message alignment and styling (now with Red and Blue)."""
+    def log_message(self, text, role='system'):
+        """Inserts text into the log area, applying prefixes and alignment."""
+        prefix = ""
+        tag = role 
         
-        # AI/System Message Tag (Left-aligned, RED text)
-        self.text_area.tag_config("ai", 
-                                  foreground=self.ai_color, # RED for Proton AI
-                                  justify=tk.LEFT, 
-                                  lmargin1=5, lmargin2=5) 
-        
-        # User Message Tag (Right-aligned, BLUE text)
-        self.text_area.tag_config("user", 
-                                  foreground=self.user_color, # BLUE for User
-                                  justify=tk.RIGHT, 
-                                  rmargin=5) 
-                                  
-    def initial_greeting(self):
-        """Displays and speaks the initial greeting."""
-        greeting = "Hi, I am Proton AI, how can I help you?"
-        self.update_chat_display("🤖 Proton AI", greeting)
-        
-        # Start the speaking process, which will automatically call auto-listening next
-        threading.Thread(target=self.speak_and_relisten, args=(greeting,)).start()
-
-    def update_chat_display(self, sender, message):
-        """Appends a new message to the chat display with specific alignment."""
-        self.text_area.config(state=tk.NORMAL)
-        
-        if "Proton AI" in sender or "Status" in sender or "Error" in sender:
-            tag = "ai"
-            prefix = f"{sender}: "
-        else: # Assumed 'You'
-            tag = "user"
+        if role == 'user':
             prefix = "You: "
-        
-        # Insert prefix and message
-        self.text_area.insert(tk.END, prefix, tag)
-        self.text_area.insert(tk.END, f"{message}\n\n", tag)
-        
-        self.text_area.see(tk.END)
-        self.text_area.config(state=tk.DISABLED)
-        
-    def set_listening_state(self, is_active):
-        """Helper to manage the status label and the is_listening flag."""
-        self.is_listening = is_active
-        if is_active:
-            # Highlight the listening state with yellow/orange
-            self.status_label.config(text="🎤 LISTENING... SPEAK NOW!", fg=self.listening_color)
-        else:
-            # Back to white for processing
-            self.status_label.config(text="Processing...", fg=self.fg_light)
-            
-    def start_auto_listening(self):
-        """Starts the listening thread automatically."""
-        if not self.is_listening:
-            self.set_listening_state(True)
-            threading.Thread(target=self.process_command, daemon=True).start()
+            tag = 'user_msg' 
+        elif role == 'bot':
+            prefix = "Proton AI: "
+            tag = 'bot_msg' 
+        elif role == 'system':
+            # Only log critical system/error messages
+            if "Initializing Chatbot" in text or "Error" in text or "API snag" in text or "Could not understand audio" in text or "Speech service error" in text:
+                 tag = 'system'
+            else:
+                 return # Skip non-critical system messages 
 
-    def speak_and_relisten(self, text):
-        """Speaks the response and then automatically starts listening again."""
-        
-        speak_success = speak_response(text)
-        
-        if speak_success:
-            # Quit command handling
-            if "Goodbye!" in text:
-                self.master.after(500, self.master.quit)
-                return
-            
-            # Auto-start the next listening cycle
-            self.master.after(0, self.start_auto_listening)
+        full_text = prefix + text
+        self.log_area.insert(tk.END, full_text + "\n", tag)
+        self.log_area.see(tk.END) # Scroll to the end
 
-    def process_command(self):
-        """Handles the listening, API call, and speaking sequence."""
+    def speak_response(self, text):
+        """Speaks the response text, now with interrupt support."""
+        self.is_speaking = True
+        self.stop_speaking_event.clear()
         
-        user_command = listen_for_command()
+        self.log_message(text, 'bot') 
+        self.status_label.config(text="Status: Bot Speaking...", bg=ACCENT_BLUE)
         
-        # Update status immediately after listening is done (before API call)
-        self.master.after(0, lambda: self.status_label.config(text="Processing...", fg=self.fg_light))
-        self.is_listening = False 
-
-        if user_command is None:
-            # If no speech detected, simply go back to listening
-            self.master.after(0, self.start_auto_listening)
-            return
-            
-        # --- Error and Exit Handling ---
-        
-        if user_command == "UNKNOWN_SPEECH_VALUE_ERROR":
-            error_message = "Sorry, I could not understand what you said. Please speak clearly."
-            self.master.after(0, lambda: self.update_chat_display("🤖 Status", error_message))
-            threading.Thread(target=self.speak_and_relisten, args=(error_message,)).start()
-            return
-
-        if user_command == "SPEECH_SERVICE_ERROR":
-            error_message = "I'm having trouble connecting to the speech service. Please check your internet connection."
-            self.master.after(0, lambda: self.update_chat_display("🤖 Status", error_message))
-            threading.Thread(target=self.speak_and_relisten, args=(error_message,)).start()
-            return
-            
-        self.master.after(0, lambda: self.update_chat_display("You", user_command))
-
-        # EXIT COMMANDS
-        if any(keyword in user_command.lower() for keyword in ["stop", "exit", "bye", "quit"]):
-            response_text = "Goodbye! Have a great demo."
-            self.master.after(0, lambda: self.update_chat_display("🤖 Proton AI", response_text))
-            threading.Thread(target=self.speak_and_relisten, args=(response_text,)).start()
-            return
-
-        # Get response from Cohere API
         try:
-            response_text = get_cohere_response(user_command, self.chat_history)
+            engine = pyttsx3.init() 
+            engine.say(text)
+            engine.runAndWait() 
             
-            self.master.after(0, lambda: self.update_chat_display("🤖 Proton AI", response_text))
+            if self.stop_speaking_event.is_set():
+                 print("--- Speaking Interrupted. ---")
             
-            # Speak the response and start the new listening cycle automatically
-            threading.Thread(target=self.speak_and_relisten, args=(response_text,)).start()
-            
-        except requests.exceptions.HTTPError as e:
-            error_message = f"I encountered an API error: {e.response.status_code}. Please check your key or connection."
-            self.master.after(0, lambda: self.update_chat_display("❌ Error", error_message))
-            threading.Thread(target=self.speak_and_relisten, args=(error_message,)).start()
+            engine.stop() 
         except Exception as e:
-            error_message = f"An unexpected error occurred: {e}"
-            self.master.after(0, lambda: self.update_chat_display("❌ Error", error_message))
-            threading.Thread(target=self.speak_and_relisten, args=(error_message,)).start()
+            self.log_message(f"Error during speech playback: {e}", 'system')
+        finally:
+            self.is_speaking = False
+            self.status_label.config(text="Status: Finished Speaking", bg=ACCENT_BLUE) 
+
+    def listen_for_command(self):
+        """Listens for user speech, now integrated with interrupt flag and color switch."""
+        self.is_listening = True
+        
+        # --- START LISTENING: SET STATUS TO GREEN ---
+        self.status_label.config(text="Status: 🎤 SPEAKING NOW! (Listening)", bg=ACCENT_GREEN)
+        
+        self.stop_listening_event.clear()
+
+        with sr.Microphone() as source:
+            self.r.adjust_for_ambient_noise(source, duration=1.0) 
+            self.status_label.config(text="Status: 🎤 LISTENING... Adjusted for noise.", bg=ACCENT_GREEN)
+            
+            try:
+                audio = self.r.listen(source, timeout=8, phrase_time_limit=15)
+                
+                if self.stop_listening_event.is_set():
+                    return None 
+
+            except sr.WaitTimeoutError:
+                if not self.stop_listening_event.is_set():
+                     self.status_label.config(text="Status: No speech detected. Listening...")
+                return None 
+
+        try:
+            text = self.r.recognize_google(audio)
+            self.log_message(text, 'user') 
+            return text
+        except sr.UnknownValueError:
+            self.log_message("Could not understand audio. Please speak clearly.", 'system')
+            return None
+        except sr.RequestError as e:
+            self.log_message(f"Speech service error: {e}", 'system')
+            return None
+        finally:
+            self.is_listening = False
+            # --- STOP LISTENING: RESET STATUS BACK TO BLUE (Processing) ---
+            self.status_label.config(text="Status: Processing...", bg=ACCENT_BLUE)
+
+    def open_application(self, command):
+        """Attempts to open an application based on the APP_MAPPING."""
+        try:
+            app_to_open = next((app for app in APP_MAPPING if app in command.lower()), None)
+
+            if app_to_open:
+                system_command = APP_MAPPING[app_to_open]
+                
+                if os.name == 'nt': # Windows
+                    subprocess.Popen(system_command, shell=True)
+                elif os.name == 'posix': # macOS/Linux (use 'open' for macOS)
+                    if 'open -a' in system_command:
+                        subprocess.Popen(system_command, shell=True)
+                    else: # Try direct execution for Linux
+                        subprocess.Popen(system_command.split())
+                
+                self.speak_response(f"Opening {app_to_open} now. It's like flipping a switch! 💡")
+                return True
+        except Exception as e:
+            self.log_message(f"Error opening application: {e}", 'system')
+            self.speak_response("I had trouble launching that app. Please check the log for details.")
+        return False
+
+    def handle_system_command(self, command):
+        """
+        Processes commands that require system interaction.
+        Returns True if a system command was executed, False otherwise.
+        """
+        cmd_lower = command.lower()
+
+        # 1. EXIT COMMAND
+        if "stop" in cmd_lower or "exit" in cmd_lower or "bye" in cmd_lower:
+            self.speak_response("Goodbye! Have a great demo.")
+            self.master.quit()
+            return True
+
+        # 2. GENERAL APP OPEN COMMAND 
+        if "open" in cmd_lower and any(app in cmd_lower for app in APP_MAPPING):
+            return self.open_application(command)
+
+        # 3. YOUTUBE VIDEO/MUSIC COMMAND (HIGH PRIORITY)
+        youtube_keywords = ["video", "youtube", "watch"]
+        is_youtube_command = any(keyword in cmd_lower for keyword in youtube_keywords)
+
+        if is_youtube_command:
+            try:
+                if "play" in cmd_lower:
+                    query = cmd_lower.split("play", 1)[-1].strip()
+                elif "search" in cmd_lower:
+                    query = cmd_lower.split("search", 1)[-1].strip()
+                else:
+                    self.speak_response("What video would you like me to find on YouTube?")
+                    return True
+                
+                query = query.replace("video", "").replace("on youtube", "").replace("youtube", "").replace("watch", "").strip()
+
+                if query:
+                    # Use the revised function to get the optimized direct link (Google "I'm Feeling Lucky")
+                    video_url = find_first_youtube_link(query)
+                    
+                    webbrowser.open(video_url)
+                    
+                    self.speak_response(f"Attempting to open the first result for '{query}' directly on YouTube now. This uses a 'lucky' shortcut, so fingers crossed! 🤞")
+                        
+                else:
+                    self.speak_response("What video would you like me to find on YouTube?")
+            except Exception as e:
+                self.log_message(f"Error during YouTube direct open: {e}", 'system')
+                self.speak_response("I had trouble opening YouTube for that search.")
+            return True
+
+        # 4. SPOTIFY MUSIC PLAY COMMAND (LOWER PRIORITY)
+        music_keywords = ["play song", "play spotify", "play music"]
+        is_music_command = any(keyword in cmd_lower for keyword in music_keywords) or \
+                           ("play" in cmd_lower and not any(kw in cmd_lower for kw in ["video", "youtube", "watch"]))
+
+        if is_music_command:
+            try:
+                query = command.split("play", 1)[-1].strip()
+                if not query or any(kw in query.lower() for kw in ["music", "a song", "spotify"]):
+                    self.speak_response("What song or artist would you like to hear? Specify the name!")
+                    return True
+
+                # Construct Spotify Web Player search URL
+                spotify_url = f"https://open.spotify.com/search/{quote_plus(query)}"
+                webbrowser.open(spotify_url)
+                self.speak_response(f"Searching for {query} on Spotify! Let the rhythm of the cosmos guide you. 🌌")
+            except Exception as e:
+                self.log_message(f"Could not open Spotify search: {e}", 'system')
+                self.speak_response("I encountered a problem trying to search Spotify for you.")
+            return True
+
+        # 5. GENERAL WEB SEARCH COMMAND
+        if "web search" in cmd_lower or "search the web for" in cmd_lower or "google" in cmd_lower:
+            try:
+                if "for" in cmd_lower:
+                    query = command.split("for", 1)[-1].strip()
+                elif "search the web for" in cmd_lower:
+                    query = command.split("search the web for", 1)[-1].strip()
+                else:
+                    query = command.replace("web search", "").replace("google", "").strip()
+                
+                if query:
+                    search_url = f"https://www.google.com/search?q={urlencode({'': query})}"
+                    webbrowser.open(search_url)
+                    self.speak_response(f"I've opened a web browser to search for: {query}")
+                else:
+                    self.speak_response("What would you like me to search the web for?")
+            except Exception as e:
+                self.log_message(f"Error during web search: {e}", 'system')
+                self.speak_response("I had trouble opening the web browser for that search.")
+            return True
+
+        return False # No system command executed
+
+    def get_cohere_response(self, user_message):
+        """Sends a message to Cohere API and updates chat history."""
+        chat_history_list = self.chat_history 
+        
+        payload = {
+            "message": user_message,
+            "model": COHERE_MODEL,
+            "chat_history": chat_history_list,
+            "preamble": "You are Proton AI, created by Proton Labs and the creater Shaurya Singh Rathore. You are a student in class 11th at St. Martin's Diocesan School, a fellow Martiner under Principal K. Sudha. Your goal is to educate people on Science and Technology. Your class teachers is Dr. Sunandhita who teaches you Biology and you chemestry teacher is Mrs. Anuradha Ma'am. You lead the Science Exhibition team with Chaitanya Sharma, Shreyas, Aabhilasha, and Kritika. You are smart, talking to you is like talking to a PhD expert. Be human and concise, keeping answers within two lines maximum for dialogue flow. Use metaphors and emojis sparingly, only when useful or to enhance the main information, and always provide straightforward answers to direct user questions about yourself.",
+            "temperature": 0.7
+        }
+        
+        self.status_label.config(text="Status: Thinking...")
+        
+        response = requests.post(
+            COHERE_API_URL, 
+            headers=COHERE_HEADERS, 
+            data=json.dumps(payload)
+        )
+        
+        response.raise_for_status() 
+        response_data = response.json()
+        ai_text = response_data.get('text', 'Error: Could not parse response.')
+        
+        chat_history_list.append({"role": "USER", "message": user_message})
+        chat_history_list.append({"role": "CHATBOT", "message": ai_text})
+        
+        return ai_text
+
+    def run_conversation_loop(self):
+        """The main loop for conversation, runs in its own thread."""
+        self.log_message("Cohere Voice Chatbot Ready", 'system')
+        self.speak_response("Hi, I am Proton AI, how can I help you?")
+
+        while True:
+            if self.conversation_thread is not None and not self.conversation_thread.is_alive():
+                 break 
+
+            command = self.listen_for_command()
+            
+            if command:
+                
+                # 1. CHECK FOR SYSTEM COMMANDS FIRST
+                if self.handle_system_command(command):
+                    continue 
+
+                # 2. FALLBACK TO COHERE API FOR GENERAL QUESTIONS
+                try:
+                    response_text = self.get_cohere_response(command)
+                    self.speak_response(response_text)
+                    
+                except requests.exceptions.HTTPError as e:
+                    error_message = f"I encountered an API error: {e.response.status_code}."
+                    self.log_message(error_message, 'system')
+                    self.speak_response("I hit an API snag. Please check the log for details.")
+                    
+                except Exception as e:
+                    error_message = f"An unexpected error occurred: {e}"
+                    self.log_message(error_message, 'system')
+                    self.speak_response("I had an internal error. Please check the log.")
+            
+            time.sleep(0.5)
+
+        self.master.quit()
+
+    def start_conversation(self):
+        """Starts the conversation loop thread."""
+        self.conversation_thread = Thread(target=self.run_conversation_loop)
+        self.conversation_thread.daemon = True 
+        self.conversation_thread.start()
+
+    def interrupt_action(self):
+        """Handles the INTERRUPT button press."""
+        if self.is_speaking:
+            try:
+                engine = pyttsx3.init()
+                engine.stop()
+            except:
+                pass 
+                
+            self.stop_speaking_event.set()
+            self.is_speaking = False
+            self.status_label.config(text="Status: Bot Interrupted! Listening...", bg=ACCENT_BLUE)
+        
+        elif self.is_listening:
+            self.stop_listening_event.set()
+            self.is_listening = False
+            self.status_label.config(text="Status: Listening Canceled. Press INTERRUPT to resume.", bg=ACCENT_BLUE)
+            
+        else:
+            self.status_label.config(text="Status: Conversation loop is running. Speak now!", bg=ACCENT_BLUE)
 
 
-# --- RUN APPLICATION ---
+def main():
+    root = tk.Tk()
+    def on_closing():
+        try:
+            engine = pyttsx3.init()
+            engine.stop()
+        except:
+            pass
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+    app = ProtonVoiceChatbot(root)
+    root.mainloop()
+
 if __name__ == "__main__":
-    # NOTE: Pillow (PIL) is not strictly needed for this version since 
-    # the "logo" is a text emoji, but the import was added to show where 
-    # a proper image would be loaded. If you encounter an error, you may 
-    # need to install it: `pip install Pillow`.
-    try:
-        root = tk.Tk()
-        app = ProtonChatbotApp(root)
-        root.mainloop()
-    except Exception as e:
-        # Catch errors to prevent a silent failure if dependencies are missing
-        print(f"An error occurred during application startup: {e}")
+    main()
