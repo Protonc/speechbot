@@ -7,12 +7,45 @@ import time
 import tkinter as tk
 from tkinter import scrolledtext, font
 from threading import Thread, Event
-import webbrowser 
+import webbrowser
 from urllib.parse import quote_plus, urlencode
-import subprocess 
-from bs4 import BeautifulSoup # Kept for consistency, but not used in the final YouTube logic
+import subprocess
+import re # For parsing numerical commands
+import platform # For robust OS detection
+from bs4 import BeautifulSoup 
 
-# --- CONFIGURATION (KEPT EXACTLY AS PROVIDED) ---
+# =====================================================================
+# ⚠️ REQUIRED DEPENDENCIES:
+# pip install pyttsx3 speechrecognition requests pycaw screen-brightness-control
+# =====================================================================
+
+# --- OPTIONAL IMPORTS (Required for system control on specific OSes) ---
+try:
+    # --- WINDOWS VOLUME CONTROL (pycaw) ---
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+except ImportError:
+    IAudioEndpointVolume = None
+
+try:
+    # --- BRIGHTNESS CONTROL (Cross-Platform) ---
+    import screen_brightness_control as sbc
+except ImportError:
+    sbc = None
+
+# --- NUMBER PARSING UTILITY ---
+# Maps spoken number words (up to 100) to integers.
+WORD_TO_NUMBER = {
+    'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+    'ten': 10, 'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15, 'sixteen': 16, 'seventeen': 17,
+    'eighteen': 18, 'nineteen': 19, 'twenty': 20, 'thirty': 30, 'forty': 40, 'fifty': 50, 'sixty': 60, 'seventy': 70,
+    'eighty': 80, 'ninety': 90, 'hundred': 100, 'a hundred': 100
+}
+# 🟢 CRITICAL FIX (Regex): Escaping curly braces to avoid KeyError during format().
+NUMBER_REGEX = r'(\d{{1,3}})[%\s]*|(\b(?:{})(?: percent)?\b)'.format('|'.join(WORD_TO_NUMBER.keys()))
+
+
+# --- CONFIGURATION ---
 COHERE_API_KEY = "7wSjrqmCbRauy8OReRsScbpJOxLUcIBeBo5Ckw3i"
 COHERE_MODEL = 'command-a-03-2025'
 COHERE_API_URL = "https://api.cohere.ai/v1/chat"
@@ -22,33 +55,121 @@ COHERE_HEADERS = {
 }
 
 # --- THEME CONSTANTS ---
-BG_DARK = "#1E1E1E"         # Dark background
-FG_LIGHT = "#FFFFFF"        # White foreground text
-ACCENT_BLUE = "#3399FF"     # Accent color for Status Box (Default/Processing)
-ACCENT_GREEN = "#3CB371"    # Green accent for Status Box (Listening/Go)
-ACCENT_YELLOW = "#FFD700"   # Yellow accent for INTERRUPT button
-TEXT_AREA_BG = "#2D2D2D"    # Slightly lighter dark for text area
+BG_DARK = "#1E1E1E"          
+FG_LIGHT = "#FFFFFF"         
+ACCENT_BLUE = "#3399FF"      
+ACCENT_GREEN = "#3CB371"     
+ACCENT_YELLOW = "#FFD700"    
+TEXT_AREA_BG = "#2D2D2D"     
 
-# --- SYSTEM APP MAPPING (OS Dependent) ---
+# --- 🎯 SYSTEM APP MAPPING ---
 APP_MAPPING = {
-    # Windows Commands (can be executed via 'start' or direct executable name)
+    # 1. MICROSOFT OFFICE SUITE
+    'word': 'winword.exe' if os.name == 'nt' else 'Microsoft Word', 
+    'excel': 'excel.exe' if os.name == 'nt' else 'Microsoft Excel',
+    'powerpoint': 'powerpnt.exe' if os.name == 'nt' else 'Microsoft PowerPoint',
+    'outlook': 'outlook.exe' if os.name == 'nt' else 'Microsoft Outlook',
+    'onenote': 'onenote.exe' if os.name == 'nt' else 'Microsoft OneNote',
+    'access': 'msaccess.exe' if os.name == 'nt' else None, 
+    'publisher': 'mspub.exe' if os.name == 'nt' else None, 
+
+    # 2. MODERN APPS / OTHER UTILITIES
+    'whatsapp': 'whatsapp://' if os.name == 'nt' else 'WhatsApp', 
+    'vscode': 'code' if os.name == 'nt' else 'Visual Studio Code', 
+    'visual studio code': 'code' if os.name == 'nt' else 'Visual Studio Code', 
+    
+    # 3. GAMING (Specific launchers)
+    'tlauncher': 'TLauncher://' if os.name == 'nt' else 'TLauncher',
+    'minecraft': 'TLauncher://' if os.name == 'nt' else 'TLauncher', 
+
+    # 4. DEFAULT OS APPS 
+    'explorer': 'explorer.exe' if os.name == 'nt' else 'Finder', 
+    'finder': 'explorer.exe' if os.name == 'nt' else 'Finder', 
+    'edge': 'msedge.exe' if os.name == 'nt' else 'Microsoft Edge', 
     'calculator': 'calc.exe' if os.name == 'nt' else 'Calculator',
-    'notepad': 'notepad.exe' if os.name == 'nt' else None,
-    'browser': 'chrome' if os.name == 'nt' else 'open -a "Google Chrome"',
-    # macOS Commands (use 'open -a [App Name]')
-    'terminal': 'cmd' if os.name == 'nt' else 'open -a Terminal',
-    'photos': 'explorer' if os.name == 'nt' else 'open -a Photos',
+    'notepad': 'notepad.exe' if os.name == 'nt' else 'TextEdit', 
+    'textedit': 'notepad.exe' if os.name == 'nt' else 'TextEdit', 
+    'paint': 'mspaint.exe' if os.name == 'nt' else 'Preview', 
+    'settings': 'ms-settings:' if os.name == 'nt' else 'System Settings', 
+    'terminal': 'cmd.exe' if os.name == 'nt' else 'Terminal',
+    'browser': 'chrome' if os.name == 'nt' else 'Google Chrome', 
 }
 
 # --- YOUTUBE DIRECT SEARCH HELPER FUNCTION ---
 def find_first_youtube_link(query):
-    """
-    Constructs a Google search URL designed to bypass the search page 
-    and open the top YouTube video result directly using the 'I'm Feeling Lucky' parameter.
-    """
-    # This URL searches Google for "youtube [query]" and uses the &btnI parameter 
-    # to attempt a direct redirect to the first search result.
+    """Constructs a Google search URL for a direct YouTube link."""
     return f"https://www.google.com/search?q=youtube+{quote_plus(query)}&btnI"
+
+
+# --- SYSTEM CONTROL HELPER FUNCTIONS ---
+
+def parse_level_command(command: str) -> int or None:
+    """Extracts a number (0-100) from a string, handling both digits and words."""
+    match = re.search(NUMBER_REGEX, command.lower())
+    
+    if match:
+        # Group 1 captures digits, Group 2 captures words
+        if match.group(1):
+            level = int(match.group(1))
+        elif match.group(2):
+            level_word = match.group(2).replace(' percent', '').strip()
+            level = WORD_TO_NUMBER.get(level_word, None)
+        else:
+            return None
+
+        # Clamp the value between 0 and 100
+        if level is not None:
+            return max(0, min(100, level))
+    
+    return None
+
+def set_system_volume(level: int, app_instance):
+    """Sets the system master volume to a percentage (0-100)."""
+    
+    try:
+        if platform.system() == 'Windows' and IAudioEndpointVolume:
+            devices = AudioUtilities.GetSpeakers()
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            volume = interface.QueryInterface(IAudioEndpointVolume)
+            new_volume_scalar = level / 100.0
+            volume.SetMasterVolumeLevelScalar(new_volume_scalar, None)
+            app_instance.speak_response(f"Volume set to **{level}** percent.")
+        
+        elif platform.system() == 'Darwin': # macOS
+            subprocess.run(['osascript', '-e', f'set volume output volume {level}'], check=True)
+            app_instance.speak_response(f"Volume set to **{level}** percent.")
+        
+        elif platform.system() == 'Linux':
+            subprocess.run(['amixer', '-D', 'pulse', 'sset', 'Master', f'{level}%'], check=True)
+            app_instance.speak_response(f"Volume set to **{level}** percent.")
+            
+        else:
+            app_instance.speak_response(f"I cannot control the volume on your current operating system: {platform.system()}.")
+
+    except Exception as e:
+        app_instance.log_message(f"Error setting volume: {e}", 'system')
+        app_instance.speak_response(f"Sorry, I ran into an error trying to set the volume.")
+
+
+def set_system_brightness(level: int, app_instance):
+    """Sets the screen brightness to a percentage (0-100)."""
+    
+    try:
+        if sbc: # Use screen-brightness-control if available
+            sbc.set_brightness(level)
+            app_instance.speak_response(f"Screen brightness set to **{level}** percent.")
+        
+        elif platform.system() == 'Darwin': # macOS fallback
+            subprocess.run(['osascript', '-e', f'tell application "System Events" to set the brightness of display 1 to {level/100.0}'], check=True)
+            app_instance.speak_response(f"Screen brightness set to **{level}** percent.")
+            
+        else:
+            app_instance.speak_response(f"I need the 'screen-brightness-control' library or OS support to control brightness on {platform.system()}.")
+    
+    except Exception as e:
+        app_instance.log_message(f"Error setting brightness: {e}", 'system')
+        app_instance.speak_response(f"Sorry, I had trouble setting the screen brightness.")
+
 
 # --- CHATBOT CLASS ---
 
@@ -69,6 +190,13 @@ class ProtonVoiceChatbot:
         self.conversation_thread = None
         self.is_listening = False
         self.is_speaking = False
+        
+        # 🟢 CRITICAL FIX 1: Initialize TTS engine ONCE for stability
+        try:
+            self.engine = pyttsx3.init()
+        except Exception as e:
+            print(f"Error initializing TTS engine: {e}")
+            self.engine = None
 
         # --- GUI SETUP ---
         self.setup_gui_widgets()
@@ -79,21 +207,17 @@ class ProtonVoiceChatbot:
     def setup_gui_widgets(self):
         """Creates and styles all Tkinter widgets."""
         
-        # Font settings
         self.mono_font = font.Font(family="Consolas", size=12) 
         self.heading_font = font.Font(family="Segoe UI", size=16, weight="bold") 
         
-        # Title Label
         title_label = tk.Label(self.master, text="⚛️ Proton AI Voice Chatbot", font=self.heading_font, 
-                               bg=BG_DARK, fg=ACCENT_BLUE, pady=10)
+                                 bg=BG_DARK, fg=ACCENT_BLUE, pady=10)
         title_label.pack(fill=tk.X)
         
-        # Scrolled Text for Conversation Log
         self.log_area = scrolledtext.ScrolledText(self.master, wrap=tk.WORD, font=self.mono_font, 
                                                  bg=TEXT_AREA_BG, fg=FG_LIGHT, bd=0, 
                                                  highlightthickness=0, relief=tk.FLAT, height=20)
         
-        # Tags for Alignment and Clean Display
         self.log_area.tag_config('user_msg', foreground='#00FF7F', justify='right') 
         self.log_area.tag_config('bot_msg', foreground=ACCENT_BLUE, justify='left') 
         self.log_area.tag_config('system', foreground='#FFD700', justify='center')
@@ -101,33 +225,26 @@ class ProtonVoiceChatbot:
         self.log_area.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
         self.log_area.insert(tk.END, "--- Initializing Chatbot ---\n", 'system')
 
-        # --- Frame for Button and Status (using Grid) ---
         self.bottom_frame = tk.Frame(self.master, bg=BG_DARK)
         self.bottom_frame.pack(pady=(5, 15), padx=10, fill=tk.X)
-        
-        # Configure grid columns: 
         self.bottom_frame.grid_columnconfigure(0, weight=1) 
         self.bottom_frame.grid_columnconfigure(1, weight=0) 
         
-        # Interrupt Button (Yellow)
         self.interrupt_button = tk.Button(self.bottom_frame, text="INTERRUPT", 
-                                         command=self.interrupt_action, bg=ACCENT_YELLOW, 
-                                         fg=BG_DARK, activebackground="#E5C100", 
-                                         activeforeground=BG_DARK, 
-                                         font=self.heading_font, relief=tk.FLAT, bd=0)
+                                             command=self.interrupt_action, bg=ACCENT_YELLOW, 
+                                             fg=BG_DARK, activebackground="#E5C100", 
+                                             activeforeground=BG_DARK, 
+                                             font=self.heading_font, relief=tk.FLAT, bd=0)
         
-        # Grid placement: Row 0, Column 0.
         self.interrupt_button.grid(row=0, column=0, sticky=tk.EW, padx=(0, 5), pady=5)
         
-        # Status Label - Starts Blue
         self.status_label = tk.Label(self.bottom_frame, text="Status: Ready", 
-                                      bg=ACCENT_BLUE, 
-                                      fg=FG_LIGHT, 
-                                      font=("Segoe UI", 10), 
-                                      anchor='center', 
-                                      width=35) 
+                                         bg=ACCENT_BLUE, 
+                                         fg=FG_LIGHT, 
+                                         font=("Segoe UI", 10), 
+                                         anchor='center', 
+                                         width=35) 
         
-        # Grid placement: Row 0, Column 1.
         self.status_label.grid(row=0, column=1, sticky=tk.E + tk.NS, padx=(5, 0), pady=5)
 
 
@@ -143,18 +260,23 @@ class ProtonVoiceChatbot:
             prefix = "Proton AI: "
             tag = 'bot_msg' 
         elif role == 'system':
-            # Only log critical system/error messages
-            if "Initializing Chatbot" in text or "Error" in text or "API snag" in text or "Could not understand audio" in text or "Speech service error" in text:
+            if any(keyword in text for keyword in ["Initializing", "Error", "API snag", "Could not understand audio", "Speech service error", "TTS Engine"]):
                  tag = 'system'
             else:
-                 return # Skip non-critical system messages 
+                 return 
 
         full_text = prefix + text
         self.log_area.insert(tk.END, full_text + "\n", tag)
-        self.log_area.see(tk.END) # Scroll to the end
+        self.log_area.see(tk.END) 
 
     def speak_response(self, text):
-        """Speaks the response text, now with interrupt support."""
+        """Speaks the response text, using the initialized engine."""
+        
+        if not self.engine:
+            self.log_message("TTS Engine is not available. Voice output disabled.", 'system')
+            self.log_message(text, 'bot') 
+            return
+            
         self.is_speaking = True
         self.stop_speaking_event.clear()
         
@@ -162,27 +284,23 @@ class ProtonVoiceChatbot:
         self.status_label.config(text="Status: Bot Speaking...", bg=ACCENT_BLUE)
         
         try:
-            engine = pyttsx3.init() 
-            engine.say(text)
-            engine.runAndWait() 
+            self.engine.say(text)
+            self.engine.runAndWait() 
             
-            if self.stop_speaking_event.is_set():
-                 print("--- Speaking Interrupted. ---")
+            # Note: self.engine.stop() is now handled in interrupt_action if needed.
             
-            engine.stop() 
         except Exception as e:
             self.log_message(f"Error during speech playback: {e}", 'system')
         finally:
             self.is_speaking = False
             self.status_label.config(text="Status: Finished Speaking", bg=ACCENT_BLUE) 
 
+
     def listen_for_command(self):
-        """Listens for user speech, now integrated with interrupt flag and color switch."""
+        """Listens for user speech."""
         self.is_listening = True
         
-        # --- START LISTENING: SET STATUS TO GREEN ---
         self.status_label.config(text="Status: 🎤 SPEAKING NOW! (Listening)", bg=ACCENT_GREEN)
-        
         self.stop_listening_event.clear()
 
         with sr.Microphone() as source:
@@ -212,73 +330,110 @@ class ProtonVoiceChatbot:
             return None
         finally:
             self.is_listening = False
-            # --- STOP LISTENING: RESET STATUS BACK TO BLUE (Processing) ---
             self.status_label.config(text="Status: Processing...", bg=ACCENT_BLUE)
 
     def open_application(self, command):
-        """Attempts to open an application based on the APP_MAPPING."""
-        try:
-            app_to_open = next((app for app in APP_MAPPING if app in command.lower()), None)
+        """Attempts to open an application."""
+        cmd_lower = command.lower()
+        app_name = None
+        system_command = None
+        
+        for key, mapped_command in APP_MAPPING.items():
+            if key in cmd_lower: 
+                app_name = key
+                system_command = mapped_command
+                break
+        
+        # If application is not found in the mapping, try to extract a generic app name
+        if not app_name or not system_command:
+            try:
+                app_name_guess = cmd_lower.split("open", 1)[-1].strip()
+                if not app_name_guess: return False
 
-            if app_to_open:
-                system_command = APP_MAPPING[app_to_open]
-                
-                if os.name == 'nt': # Windows
-                    subprocess.Popen(system_command, shell=True)
-                elif os.name == 'posix': # macOS/Linux (use 'open' for macOS)
-                    if 'open -a' in system_command:
-                        subprocess.Popen(system_command, shell=True)
-                    else: # Try direct execution for Linux
-                        subprocess.Popen(system_command.split())
-                
-                self.speak_response(f"Opening {app_to_open} now. It's like flipping a switch! 💡")
-                return True
+                if os.name == 'nt':
+                    system_command = app_name_guess
+                elif platform.system() == 'Darwin':
+                    system_command = app_name_guess.title() 
+                else:
+                    system_command = app_name_guess 
+                    
+                speak_name = app_name_guess
+            except:
+                return False 
+        else:
+            speak_name = app_name # Use mapped name for speech
+        
+        # --- EXECUTION ---
+        try:
+            if os.name == 'nt': 
+                # Use 'start' for .exe, URI schemes, and general Windows program search.
+                subprocess.Popen(['start', system_command], shell=True) 
+            elif platform.system() == 'Darwin': 
+                subprocess.Popen(['open', '-a', system_command])
+            else:
+                subprocess.Popen(system_command.split()) 
+
+            self.speak_response(f"Opening **{speak_name.title()}** now. Enjoy your app launch! 💡")
+            return True
+            
+        except FileNotFoundError:
+            self.log_message(f"Error: Application '{speak_name}' not found on the system.", 'system')
+            self.speak_response(f"I couldn't find the app called '{speak_name}'. Please ensure it is installed correctly on your operating system.")
+            return True
         except Exception as e:
-            self.log_message(f"Error opening application: {e}", 'system')
-            self.speak_response("I had trouble launching that app. Please check the log for details.")
-        return False
+            self.log_message(f"Error opening application '{speak_name}': {e}", 'system')
+            self.speak_response(f"I had trouble launching {speak_name}. Check the log for details.")
+            return True
+
 
     def handle_system_command(self, command):
-        """
-        Processes commands that require system interaction.
-        Returns True if a system command was executed, False otherwise.
-        """
+        """Processes commands that require system interaction."""
         cmd_lower = command.lower()
 
         # 1. EXIT COMMAND
         if "stop" in cmd_lower or "exit" in cmd_lower or "bye" in cmd_lower:
             self.speak_response("Goodbye! Have a great demo.")
-            self.master.quit()
+            # self.master.quit() is called in the main loop after breaking
             return True
 
-        # 2. GENERAL APP OPEN COMMAND 
-        if "open" in cmd_lower and any(app in cmd_lower for app in APP_MAPPING):
+        # 2. VOLUME CONTROL COMMAND
+        if "volume" in cmd_lower and ("set" in cmd_lower or "change" in cmd_lower or "to" in cmd_lower):
+            level = parse_level_command(command)
+            if level is not None:
+                set_system_volume(level, self)
+                return True
+            else:
+                self.speak_response("Please specify the volume level as a number or word between 0 and 100.")
+                return True
+
+        # 3. BRIGHTNESS CONTROL COMMAND
+        if "brightness" in cmd_lower and ("set" in cmd_lower or "change" in cmd_lower or "to" in cmd_lower):
+            level = parse_level_command(command)
+            if level is not None:
+                set_system_brightness(level, self)
+                return True
+            else:
+                self.speak_response("Please specify the brightness level as a number or word between 0 and 100.")
+                return True
+
+        # 4. GENERAL APP OPEN COMMAND
+        if "open" in cmd_lower:
             return self.open_application(command)
 
-        # 3. YOUTUBE VIDEO/MUSIC COMMAND (HIGH PRIORITY)
+        # 5. YOUTUBE/MUSIC/WEB SEARCH
         youtube_keywords = ["video", "youtube", "watch"]
         is_youtube_command = any(keyword in cmd_lower for keyword in youtube_keywords)
 
         if is_youtube_command:
             try:
-                if "play" in cmd_lower:
-                    query = cmd_lower.split("play", 1)[-1].strip()
-                elif "search" in cmd_lower:
-                    query = cmd_lower.split("search", 1)[-1].strip()
-                else:
-                    self.speak_response("What video would you like me to find on YouTube?")
-                    return True
-                
+                query = cmd_lower.split("play", 1)[-1].strip() if "play" in cmd_lower else cmd_lower
+                query = query.split("search", 1)[-1].strip() if "search" in query else query
                 query = query.replace("video", "").replace("on youtube", "").replace("youtube", "").replace("watch", "").strip()
-
+                
                 if query:
-                    # Use the revised function to get the optimized direct link (Google "I'm Feeling Lucky")
                     video_url = find_first_youtube_link(query)
-                    
                     webbrowser.open(video_url)
-                    
-                    self.speak_response(f"Attempting to open the first result for '{query}' directly on YouTube now. This uses a 'lucky' shortcut, so fingers crossed! 🤞")
-                        
+                    self.speak_response(f"Attempting to open the first result for '{query}' directly on YouTube now. 🤞")
                 else:
                     self.speak_response("What video would you like me to find on YouTube?")
             except Exception as e:
@@ -286,7 +441,7 @@ class ProtonVoiceChatbot:
                 self.speak_response("I had trouble opening YouTube for that search.")
             return True
 
-        # 4. SPOTIFY MUSIC PLAY COMMAND (LOWER PRIORITY)
+        # Spotify/Music Command
         music_keywords = ["play song", "play spotify", "play music"]
         is_music_command = any(keyword in cmd_lower for keyword in music_keywords) or \
                            ("play" in cmd_lower and not any(kw in cmd_lower for kw in ["video", "youtube", "watch"]))
@@ -294,26 +449,22 @@ class ProtonVoiceChatbot:
         if is_music_command:
             try:
                 query = command.split("play", 1)[-1].strip()
-                if not query or any(kw in query.lower() for kw in ["music", "a song", "spotify"]):
+                if query and not any(kw in query.lower() for kw in ["music", "a song", "spotify"]):
+                    spotify_url = f"https://open.spotify.com/search/{quote_plus(query)}" 
+                    webbrowser.open(spotify_url)
+                    self.speak_response(f"Searching for {query} on Spotify! 🌌")
+                else:
                     self.speak_response("What song or artist would you like to hear? Specify the name!")
-                    return True
-
-                # Construct Spotify Web Player search URL
-                spotify_url = f"https://open.spotify.com/search/{quote_plus(query)}"
-                webbrowser.open(spotify_url)
-                self.speak_response(f"Searching for {query} on Spotify! Let the rhythm of the cosmos guide you. 🌌")
             except Exception as e:
                 self.log_message(f"Could not open Spotify search: {e}", 'system')
                 self.speak_response("I encountered a problem trying to search Spotify for you.")
             return True
-
-        # 5. GENERAL WEB SEARCH COMMAND
+            
+        # General Web Search Command
         if "web search" in cmd_lower or "search the web for" in cmd_lower or "google" in cmd_lower:
             try:
                 if "for" in cmd_lower:
                     query = command.split("for", 1)[-1].strip()
-                elif "search the web for" in cmd_lower:
-                    query = command.split("search the web for", 1)[-1].strip()
                 else:
                     query = command.replace("web search", "").replace("google", "").strip()
                 
@@ -329,7 +480,7 @@ class ProtonVoiceChatbot:
             return True
 
         return False # No system command executed
-
+        
     def get_cohere_response(self, user_message):
         """Sends a message to Cohere API and updates chat history."""
         chat_history_list = self.chat_history 
@@ -350,20 +501,35 @@ class ProtonVoiceChatbot:
             data=json.dumps(payload)
         )
         
-        response.raise_for_status() 
-        response_data = response.json()
-        ai_text = response_data.get('text', 'Error: Could not parse response.')
-        
-        chat_history_list.append({"role": "USER", "message": user_message})
-        chat_history_list.append({"role": "CHATBOT", "message": ai_text})
-        
-        return ai_text
+        try:
+            response.raise_for_status() 
+            response_data = response.json()
+            ai_text = response_data.get('text', 'Error: Could not parse response.')
+            
+            chat_history_list.append({"role": "USER", "message": user_message})
+            chat_history_list.append({"role": "CHATBOT", "message": ai_text})
+            
+            return ai_text
+        except requests.exceptions.HTTPError as e:
+            error_message = f"I encountered an API error: {e.response.status_code}."
+            self.log_message(error_message, 'system')
+            return "I hit an API snag. Please check the log for details."
+        except Exception as e:
+            error_message = f"An unexpected error occurred during API call: {e}"
+            self.log_message(error_message, 'system')
+            return "I had an internal error during the API call. Please check the log."
+
 
     def run_conversation_loop(self):
         """The main loop for conversation, runs in its own thread."""
         self.log_message("Cohere Voice Chatbot Ready", 'system')
-        self.speak_response("Hi, I am Proton AI, how can I help you?")
-
+        
+        # Initial greeting using the stable, pre-initialized engine
+        if self.engine: 
+             self.speak_response("Hi, I am Proton AI, how can I help you?")
+        else:
+             self.log_message("TTS Engine failed to initialize. Voice output disabled.", 'system')
+        
         while True:
             if self.conversation_thread is not None and not self.conversation_thread.is_alive():
                  break 
@@ -374,22 +540,12 @@ class ProtonVoiceChatbot:
                 
                 # 1. CHECK FOR SYSTEM COMMANDS FIRST
                 if self.handle_system_command(command):
+                    # If it was a system command like 'exit', the loop breaks via self.master.quit()
                     continue 
 
                 # 2. FALLBACK TO COHERE API FOR GENERAL QUESTIONS
-                try:
-                    response_text = self.get_cohere_response(command)
-                    self.speak_response(response_text)
-                    
-                except requests.exceptions.HTTPError as e:
-                    error_message = f"I encountered an API error: {e.response.status_code}."
-                    self.log_message(error_message, 'system')
-                    self.speak_response("I hit an API snag. Please check the log for details.")
-                    
-                except Exception as e:
-                    error_message = f"An unexpected error occurred: {e}"
-                    self.log_message(error_message, 'system')
-                    self.speak_response("I had an internal error. Please check the log.")
+                response_text = self.get_cohere_response(command)
+                self.speak_response(response_text)
             
             time.sleep(0.5)
 
@@ -404,16 +560,14 @@ class ProtonVoiceChatbot:
     def interrupt_action(self):
         """Handles the INTERRUPT button press."""
         if self.is_speaking:
-            try:
-                engine = pyttsx3.init()
-                engine.stop()
-            except:
-                pass 
+            # 🟢 CRITICAL FIX 3: Use the instance engine for stopping
+            if self.engine:
+                self.engine.stop()
                 
             self.stop_speaking_event.set()
             self.is_speaking = False
             self.status_label.config(text="Status: Bot Interrupted! Listening...", bg=ACCENT_BLUE)
-        
+            
         elif self.is_listening:
             self.stop_listening_event.set()
             self.is_listening = False
@@ -425,16 +579,20 @@ class ProtonVoiceChatbot:
 
 def main():
     root = tk.Tk()
+    app = ProtonVoiceChatbot(root)
+    
     def on_closing():
         try:
-            engine = pyttsx3.init()
-            engine.stop()
+            # 🟢 CRITICAL FIX 3: Cleanly stop the initialized engine instance on close
+            engine = getattr(app, 'engine', None)
+            if engine:
+                 engine.stop()
         except:
             pass
         root.destroy()
+        os._exit(0)
 
     root.protocol("WM_DELETE_WINDOW", on_closing)
-    app = ProtonVoiceChatbot(root)
     root.mainloop()
 
 if __name__ == "__main__":

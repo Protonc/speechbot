@@ -7,9 +7,13 @@ import time
 import tkinter as tk
 from tkinter import scrolledtext, font
 from threading import Thread, Event
+import webbrowser
+from urllib.parse import quote_plus, urlencode
+import subprocess
+from bs4 import BeautifulSoup 
 
 # --- CONFIGURATION (KEPT EXACTLY AS PROVIDED) ---
-COHERE_API_KEY = "Uci6E53ri06gEjPsqW5eKXUsMj7lYmMSxyTdjumb"
+COHERE_API_KEY = "7wSjrqmCbRauy8OReRsScbpJOxLUcIBeBo5Ckw3i"
 COHERE_MODEL = 'command-a-03-2025'
 COHERE_API_URL = "https://api.cohere.ai/v1/chat"
 COHERE_HEADERS = {
@@ -18,14 +22,65 @@ COHERE_HEADERS = {
 }
 
 # --- THEME CONSTANTS ---
-BG_DARK = "#1E1E1E"         # Dark background
-FG_LIGHT = "#FFFFFF"        # White foreground text
-ACCENT_BLUE = "#3399FF"     # Accent color for Status Box (Default/Processing)
-ACCENT_GREEN = "#3CB371"    # Green accent for Status Box (Listening/Go)
-ACCENT_YELLOW = "#FFD700"   # <-- NEW: Yellow accent for INTERRUPT button
-TEXT_AREA_BG = "#2D2D2D"    # Slightly lighter dark for text area
+BG_DARK = "#1E1E1E"          
+FG_LIGHT = "#FFFFFF"         
+ACCENT_BLUE = "#3399FF"      
+ACCENT_GREEN = "#3CB371"     
+ACCENT_YELLOW = "#FFD700"    
+TEXT_AREA_BG = "#2D2D2D"     
 
-# --- CHATBOT CLASS ---
+# --- 🎯 FINALIZED SYSTEM APP MAPPING (Updated for Reliability) ---
+# Maps user command keywords to OS-specific executable names.
+APP_MAPPING = {
+    # 1. MICROSOFT OFFICE SUITE
+    'word': 'winword.exe' if os.name == 'nt' else 'Microsoft Word', 
+    'excel': 'excel.exe' if os.name == 'nt' else 'Microsoft Excel',
+    'powerpoint': 'powerpnt.exe' if os.name == 'nt' else 'Microsoft PowerPoint',
+    'outlook': 'outlook.exe' if os.name == 'nt' else 'Microsoft Outlook',
+    'onenote': 'onenote.exe' if os.name == 'nt' else 'Microsoft OneNote',
+    'access': 'msaccess.exe' if os.name == 'nt' else None, 
+    'publisher': 'mspub.exe' if os.name == 'nt' else None, 
+
+    # --- 🎯 FINALIZED APP MAPPING (Best Practice) ---
+    # ... other apps ...
+    
+    # FIX for Windows Store/Modern App: Use the URI scheme for reliable launch.
+    # The 'start' command handles this protocol.
+    'whatsapp': 'whatsapp://' if os.name == 'nt' else 'WhatsApp', 
+    
+    # FIX for VS Code: Use the universally recognized shell command 'code'.
+    # This relies on your system PATH being correct (see troubleshooting below).
+    'vscode': 'code' if os.name == 'nt' else 'Visual Studio Code', 
+    'visual studio code': 'code' if os.name == 'nt' else 'Visual Studio Code', 
+    
+    # ... other apps ...
+    
+    # 3. GAMING (Specific launchers)
+    'tlauncher': 'TLauncher://' if os.name == 'nt' else 'TLauncher',
+    'minecraft': 'TLauncher://' if os.name == 'nt' else 'TLauncher', 
+
+    # 4. DEFAULT OS APPS 
+    'explorer': 'explorer.exe' if os.name == 'nt' else 'Finder', 
+    'finder': 'explorer.exe' if os.name == 'nt' else 'Finder', 
+    'edge': 'msedge.exe' if os.name == 'nt' else 'Microsoft Edge', 
+    'calculator': 'calc.exe' if os.name == 'nt' else 'Calculator',
+    'notepad': 'notepad.exe' if os.name == 'nt' else 'TextEdit', 
+    'textedit': 'notepad.exe' if os.name == 'nt' else 'TextEdit', 
+    'paint': 'mspaint.exe' if os.name == 'nt' else 'Preview', 
+    'settings': 'ms-settings:' if os.name == 'nt' else 'System Settings', 
+    'terminal': 'cmd.exe' if os.name == 'nt' else 'Terminal',
+    'browser': 'chrome' if os.name == 'nt' else 'Google Chrome', 
+}
+
+# --- YOUTUBE DIRECT SEARCH HELPER FUNCTION (KEPT AS IS) ---
+def find_first_youtube_link(query):
+    """
+    Constructs a Google search URL designed to bypass the search page 
+    and open the top YouTube video result directly using the 'I'm Feeling Lucky' parameter.
+    """
+    return f"https://www.google.com/search?q=youtube+{quote_plus(query)}&btnI"
+
+# --- CHATBOT CLASS (ONLY open_application is critical for this fix) ---
 
 class ProtonVoiceChatbot:
     """Manages the entire chatbot logic, including GUI, I/O, and API calls."""
@@ -60,13 +115,13 @@ class ProtonVoiceChatbot:
         
         # Title Label
         title_label = tk.Label(self.master, text="⚛️ Proton AI Voice Chatbot", font=self.heading_font, 
-                               bg=BG_DARK, fg=ACCENT_BLUE, pady=10)
+                                 bg=BG_DARK, fg=ACCENT_BLUE, pady=10)
         title_label.pack(fill=tk.X)
         
         # Scrolled Text for Conversation Log
         self.log_area = scrolledtext.ScrolledText(self.master, wrap=tk.WORD, font=self.mono_font, 
-                                                 bg=TEXT_AREA_BG, fg=FG_LIGHT, bd=0, 
-                                                 highlightthickness=0, relief=tk.FLAT, height=20)
+                                                   bg=TEXT_AREA_BG, fg=FG_LIGHT, bd=0, 
+                                                   highlightthickness=0, relief=tk.FLAT, height=20)
         
         # Tags for Alignment and Clean Display
         self.log_area.tag_config('user_msg', foreground='#00FF7F', justify='right') 
@@ -84,32 +139,30 @@ class ProtonVoiceChatbot:
         self.bottom_frame.grid_columnconfigure(0, weight=1) 
         self.bottom_frame.grid_columnconfigure(1, weight=0) 
         
-        # Interrupt Button (Now Yellow)
+        # Interrupt Button (Yellow)
         self.interrupt_button = tk.Button(self.bottom_frame, text="INTERRUPT", 
-                                         command=self.interrupt_action, bg=ACCENT_YELLOW, # <-- YELLOW
-                                         fg=BG_DARK, activebackground="#E5C100", 
-                                         activeforeground=BG_DARK, 
-                                         font=self.heading_font, relief=tk.FLAT, bd=0)
+                                            command=self.interrupt_action, bg=ACCENT_YELLOW, 
+                                            fg=BG_DARK, activebackground="#E5C100", 
+                                            activeforeground=BG_DARK, 
+                                            font=self.heading_font, relief=tk.FLAT, bd=0)
         
         # Grid placement: Row 0, Column 0.
         self.interrupt_button.grid(row=0, column=0, sticky=tk.EW, padx=(0, 5), pady=5)
         
         # Status Label - Starts Blue
         self.status_label = tk.Label(self.bottom_frame, text="Status: Ready", 
-                                      bg=ACCENT_BLUE, 
-                                      fg=FG_LIGHT, 
-                                      font=("Segoe UI", 10), 
-                                      anchor='center', 
-                                      width=35) 
+                                        bg=ACCENT_BLUE, 
+                                        fg=FG_LIGHT, 
+                                        font=("Segoe UI", 10), 
+                                        anchor='center', 
+                                        width=35) 
         
         # Grid placement: Row 0, Column 1.
         self.status_label.grid(row=0, column=1, sticky=tk.E + tk.NS, padx=(5, 0), pady=5)
 
 
     def log_message(self, text, role='system'):
-        """
-        Inserts text into the log area, applying prefixes and alignment. 
-        """
+        """Inserts text into the log area, applying prefixes and alignment."""
         prefix = ""
         tag = role 
         
@@ -136,7 +189,6 @@ class ProtonVoiceChatbot:
         self.stop_speaking_event.clear()
         
         self.log_message(text, 'bot') 
-        # Set status to blue while speaking
         self.status_label.config(text="Status: Bot Speaking...", bg=ACCENT_BLUE)
         
         try:
@@ -152,7 +204,7 @@ class ProtonVoiceChatbot:
             self.log_message(f"Error during speech playback: {e}", 'system')
         finally:
             self.is_speaking = False
-            self.status_label.config(text="Status: Finished Speaking", bg=ACCENT_BLUE) # Reset status to blue
+            self.status_label.config(text="Status: Finished Speaking", bg=ACCENT_BLUE) 
 
     def listen_for_command(self):
         """Listens for user speech, now integrated with interrupt flag and color switch."""
@@ -193,24 +245,188 @@ class ProtonVoiceChatbot:
             # --- STOP LISTENING: RESET STATUS BACK TO BLUE (Processing) ---
             self.status_label.config(text="Status: Processing...", bg=ACCENT_BLUE)
 
+    def open_application(self, command):
+        """
+        Attempts to open an application using the APP_MAPPING or a generic OS command.
+        
+        :param command: The full voice command (e.g., "open Microsoft Word")
+        :return: True if a launch was attempted, False otherwise.
+        """
+        cmd_lower = command.lower()
+        app_name = None
+        system_command = None
+        
+        # 1. Check for EXPLICIT app name in the command, based on APP_MAPPING keys
+        for key, mapped_command in APP_MAPPING.items():
+            # Use 'key' for comparison to catch the shorter 'vscode' and 'whatsapp' commands
+            if key in cmd_lower: 
+                app_name = key
+                system_command = mapped_command
+                break
+        
+        if app_name and system_command:
+            # Found in mapping - use the SPECIFIC system command
+            speak_name = app_name # Name to speak back
+            
+            # Handle Windows URI commands (like settings)
+            if os.name == 'nt' and system_command.endswith(':'):
+                try:
+                    subprocess.Popen(['start', system_command], shell=True)
+                    self.speak_response(f"Opening **{speak_name.title()}** now. Enjoy your app launch! 💡")
+                    return True
+                except Exception as e:
+                    pass # Fall through to error handling
+                    
+        else:
+            # 2. Not in mapping - try to extract a general app name after "open"
+            try:
+                # Simple extraction of the name following "open"
+                app_name_guess = cmd_lower.split("open", 1)[-1].strip()
+                if not app_name_guess: return False
 
+                # Convert the guess to a launchable format
+                if os.name == 'nt':
+                    # Windows: Use the name as is, relying on 'start' command's ability to resolve
+                    system_command = app_name_guess
+                elif os.name == 'posix':
+                    # macOS: Use the capitalized name for 'open -a' (e.g., 'photoshop' -> 'Photoshop')
+                    system_command = app_name_guess.title() 
+                else:
+                    system_command = app_name_guess # Linux: Use the name as is
+                    
+                speak_name = app_name_guess
+                
+            except:
+                return False # Could not parse a name
+
+        # --- EXECUTION ---
+        try:
+            if os.name == 'nt': # Windows
+                # Use the 'start' command for both mapped commands and generic guesses
+                # This is the key change for apps installed via the Microsoft Store/User Installers
+                subprocess.Popen(['start', system_command], shell=True) 
+            elif os.name == 'posix': # macOS/Linux
+                # macOS primarily uses 'open -a [App Name]'
+                subprocess.Popen(['open', '-a', system_command])
+            else:
+                subprocess.Popen(system_command.split()) # Default fallback
+
+            self.speak_response(f"Opening **{speak_name.title()}** now. Enjoy your app launch! 💡")
+            return True
+            
+        except FileNotFoundError:
+            self.log_message(f"Error: Application '{speak_name}' not found on the system.", 'system')
+            self.speak_response(f"I couldn't find the app called '{speak_name}'. Please ensure it is installed correctly on your operating system.")
+            return True
+        except Exception as e:
+            self.log_message(f"Error opening application '{speak_name}': {e}", 'system')
+            self.speak_response(f"I had trouble launching {speak_name}. Check the log for details.")
+            return True
+
+
+    def handle_system_command(self, command):
+        """
+        Processes commands that require system interaction.
+        Returns True if a system command was executed, False otherwise.
+        """
+        cmd_lower = command.lower()
+
+        # 1. EXIT COMMAND
+        if "stop" in cmd_lower or "exit" in cmd_lower or "bye" in cmd_lower:
+            self.speak_response("Goodbye! Have a great demo.")
+            self.master.quit()
+            return True
+
+        # 2. GENERAL APP OPEN COMMAND (Now handles all mapped and unmapped app requests)
+        if "open" in cmd_lower:
+            return self.open_application(command)
+
+        # 3. YOUTUBE VIDEO/MUSIC COMMAND (HIGH PRIORITY)
+        youtube_keywords = ["video", "youtube", "watch"]
+        is_youtube_command = any(keyword in cmd_lower for keyword in youtube_keywords)
+
+        if is_youtube_command:
+            try:
+                if "play" in cmd_lower:
+                    query = cmd_lower.split("play", 1)[-1].strip()
+                elif "search" in cmd_lower:
+                    query = cmd_lower.split("search", 1)[-1].strip()
+                else:
+                    self.speak_response("What video would you like me to find on YouTube?")
+                    return True
+                
+                query = query.replace("video", "").replace("on youtube", "").replace("youtube", "").replace("watch", "").strip()
+
+                if query:
+                    video_url = find_first_youtube_link(query)
+                    webbrowser.open(video_url)
+                    self.speak_response(f"Attempting to open the first result for '{query}' directly on YouTube now. This uses a 'lucky' shortcut, so fingers crossed! 🤞")
+                        
+                else:
+                    self.speak_response("What video would you like me to find on YouTube?")
+            except Exception as e:
+                self.log_message(f"Error during YouTube direct open: {e}", 'system')
+                self.speak_response("I had trouble opening YouTube for that search.")
+            return True
+
+        # 4. SPOTIFY MUSIC PLAY COMMAND (LOWER PRIORITY)
+        music_keywords = ["play song", "play spotify", "play music"]
+        is_music_command = any(keyword in cmd_lower for keyword in music_keywords) or \
+                           ("play" in cmd_lower and not any(kw in cmd_lower for kw in ["video", "youtube", "watch"]))
+
+        if is_music_command:
+            try:
+                query = command.split("play", 1)[-1].strip()
+                if not query or any(kw in query.lower() for kw in ["music", "a song", "spotify"]):
+                    self.speak_response("What song or artist would you like to hear? Specify the name!")
+                    return True
+
+                # Construct Spotify Web Player search URL
+                spotify_url = f"https://open.spotify.com/search/{quote_plus(query)}" 
+                webbrowser.open(spotify_url)
+                self.speak_response(f"Searching for {query} on Spotify! Let the rhythm of the cosmos guide you. 🌌")
+            except Exception as e:
+                self.log_message(f"Could not open Spotify search: {e}", 'system')
+                self.speak_response("I encountered a problem trying to search Spotify for you.")
+            return True
+
+        # 5. GENERAL WEB SEARCH COMMAND
+        if "web search" in cmd_lower or "search the web for" in cmd_lower or "google" in cmd_lower:
+            try:
+                if "for" in cmd_lower:
+                    query = command.split("for", 1)[-1].strip()
+                elif "search the web for" in cmd_lower:
+                    query = command.split("search the web for", 1)[-1].strip()
+                else:
+                    query = command.replace("web search", "").replace("google", "").strip()
+                
+                if query:
+                    search_url = f"https://www.google.com/search?q={urlencode({'': query})}"
+                    webbrowser.open(search_url)
+                    self.speak_response(f"I've opened a web browser to search for: {query}")
+                else:
+                    self.speak_response("What would you like me to search the web for?")
+            except Exception as e:
+                self.log_message(f"Error during web search: {e}", 'system')
+                self.speak_response("I had trouble opening the web browser for that search.")
+            return True
+
+        return False # No system command executed
+    
     def get_cohere_response(self, user_message):
         """Sends a message to Cohere API and updates chat history."""
         chat_history_list = self.chat_history 
         
-        # Format the payload
         payload = {
             "message": user_message,
             "model": COHERE_MODEL,
             "chat_history": chat_history_list,
-            # --- NEW PERSONALITY PREAMBLE (Includes constraints and personality) ---
-            "preamble": "You are Proton AI created by Proton Labs and the Creater Shaurya Singh Rathore you study in St. Martin's Diocesion School adn u are a fellow Martiner under the leadership of Principal K. Sudha you study in class 11th a your goal is to educate people on Science and Technology your Class Teacher is Dr. Sunandhita who teaches bio and your cheme=istry teacher is Mrs. Anuradha Ma'am also you Science Exibition incharge you capablities are you have learned the entire internet in you neural network and talking to you is like talking to a PHD expert in every field you are smart talk like human and very concise oly 2 lines max in a sentance as its a converstion and your best friend is Chaitanya Sharma and your science exibition teamates are Shreyas, Aabhilasha, Kritika you speak according to user input if he said little like 1-2 words you also say little if not a qeustion or expalantionary thing if it said a lot you will also say little more but withing 2 lines and also use metaphors to express yourself when ever needed not to much or in useful information or after the info and use some emojies too sometimes but don't forget to give the straight forward answers to the user what he need about you and don't talk rubbish or pointless jsut stick to point and use metaphor to enhance it not start a new waste of time thing not even sue metaphor everytime like when asking about you jsut say straight up answers ",
+            "preamble": "You are Proton AI, created by Proton Labs and the creater Shaurya Singh Rathore. You are a student in class 11th at St. Martin's Diocesan School, a fellow Martiner under Principal K. Sudha. Your goal is to educate people on Science and Technology. Your class teachers is Dr. Sunandhita who teaches you Biology and you chemestry teacher is Mrs. Anuradha Ma'am. You lead the Science Exhibition team with Chaitanya Sharma, Shreyas, Aabhilasha, and Kritika. You are smart, talking to you is like talking to a PhD expert. Be human and concise, keeping answers within two lines maximum for dialogue flow. Use metaphors and emojis sparingly, only when useful or to enhance the main information, and always provide straightforward answers to direct user questions about yourself.",
             "temperature": 0.7
         }
         
         self.status_label.config(text="Status: Thinking...")
         
-        # Make the POST request
         response = requests.post(
             COHERE_API_URL, 
             headers=COHERE_HEADERS, 
@@ -221,7 +437,6 @@ class ProtonVoiceChatbot:
         response_data = response.json()
         ai_text = response_data.get('text', 'Error: Could not parse response.')
         
-        # Update the chat history
         chat_history_list.append({"role": "USER", "message": user_message})
         chat_history_list.append({"role": "CHATBOT", "message": ai_text})
         
@@ -239,11 +454,12 @@ class ProtonVoiceChatbot:
             command = self.listen_for_command()
             
             if command:
-                # Exit command check
-                if "stop" in command.lower() or "exit" in command.lower() or "bye" in command.lower():
-                    self.speak_response("Goodbye! Have a great demo.")
-                    break
                 
+                # 1. CHECK FOR SYSTEM COMMANDS FIRST
+                if self.handle_system_command(command):
+                    continue 
+
+                # 2. FALLBACK TO COHERE API FOR GENERAL QUESTIONS
                 try:
                     response_text = self.get_cohere_response(command)
                     self.speak_response(response_text)
@@ -280,7 +496,7 @@ class ProtonVoiceChatbot:
             self.stop_speaking_event.set()
             self.is_speaking = False
             self.status_label.config(text="Status: Bot Interrupted! Listening...", bg=ACCENT_BLUE)
-        
+            
         elif self.is_listening:
             self.stop_listening_event.set()
             self.is_listening = False
@@ -299,6 +515,7 @@ def main():
         except:
             pass
         root.destroy()
+        os._exit(0)
 
     root.protocol("WM_DELETE_WINDOW", on_closing)
     app = ProtonVoiceChatbot(root)
